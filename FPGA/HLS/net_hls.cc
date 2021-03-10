@@ -377,7 +377,7 @@ void load_weight_3x3_from_axi( FIX_WT dest[32][3][3], uint512 src[3][3])
 			DATA.range(511, 0) = src[m][n].range(511, 0);
 			for(int c = 0; c < 32; c++) {
 #pragma HLS unroll
-
+				//* data orgnized 16 by 16 apart and range over 11 (WT_RG+1)
 				dest[c][m][n].range(WT_RG, 0) = DATA.range(WT_RG + c*16, c*16);
 			}
 		}
@@ -514,6 +514,7 @@ void load_image_chunk_norm(FIX_FM img_buf[32][44][84], uint8 image_in_raw_pad_bu
 {
 	uint8* image_in_raw_pad_burst_ptr;
 
+	//* first channel
 	image_in_raw_pad_burst_ptr = image_in_raw_pad_burst + (col*40 + offset_h*2)*322*2 + row*80 + offset_w*2;
 
 	for(int i = 0; i < 44; i++) {
@@ -524,6 +525,7 @@ void load_image_chunk_norm(FIX_FM img_buf[32][44][84], uint8 image_in_raw_pad_bu
 		image_in_raw_pad_burst_ptr += 322*2;
 	}
 
+	//* second channel
 	image_in_raw_pad_burst_ptr = image_in_raw_pad_burst + 1*162*2*322*2 + (col*40 + offset_h*2)*322*2 + row*80 + offset_w*2;
 	for(int i = 0; i < 44; i++) {
 		for(int j = 0; j < 84; j++) {
@@ -533,6 +535,7 @@ void load_image_chunk_norm(FIX_FM img_buf[32][44][84], uint8 image_in_raw_pad_bu
 		image_in_raw_pad_burst_ptr += 322*2;
 	}
 
+	//* third channel
 	image_in_raw_pad_burst_ptr = image_in_raw_pad_burst + 2*162*2*322*2 + (col*40 + offset_h*2)*322*2 + row*80 + offset_w*2;
 	for(int i = 0; i < 44; i++) {
 		for(int j = 0; j < 84; j++) {
@@ -820,20 +823,23 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 
 	CI_N = 32 / 32;
 	CO_N = 64 / 32;
-
+	//? Why loading bias and set bias, instead of directly loading bias
 	load_weight_3x3_from_axi(weight_buf_3x3[0], conv_weight_3x3_all[weight_3x3_index]);
 	load_bias_from_axi(bias_buf[0], bias_all[bias_3x3_index]);
+
 	load_bias_from_axi(bias_buf[1], bias_all[bias_1x1_index + 0]);
 	load_bias_from_axi(bias_buf[2], bias_all[bias_1x1_index + 1]);
 	load_weight_1x1_from_axi(weight_buf_1x1[0], conv_weight_1x1_all[weight_1x1_index + 0]);
 	load_weight_1x1_from_axi(weight_buf_1x1[1], conv_weight_1x1_all[weight_1x1_index + 1]);
-
+	//* loop1
 	for(int row = 0; row < 8; row++) {
 
 		load_image_chunk_norm(FM_buf1, image_in_raw_pad, 0, row, 0/4, row/4);
 		for(int col = 0; col < 8; col++) {
+			// *load the initial bias to the output buffer
 			set_bias_3x3(FM_buf2, bias_buf[0]);
 
+			// *ping-pong buffering
 			if( col % 2 == 0 ) {
 				DW_CONV_3x3(FM_buf1, FM_buf2, weight_buf_3x3[0], bias_buf[0], 1);
 				load_image_chunk_norm(FM_buf3, image_in_raw_pad, col+1, row, (col+1)/4, row/4);
@@ -843,6 +849,7 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 				load_image_chunk_norm(FM_buf1, image_in_raw_pad, col+1, row, (col+1)/4, row/4);
 			}
 
+			//TODO: why no ping-pong buffering here?
 			for(int co = 0; co < CO_N; co++) {
 				set_bias_1x1(FM_buf_acc, bias_buf[1 + co]);
 				CONV_1x1(FM_buf2, FM_buf_acc, weight_buf_1x1[co]);
@@ -868,27 +875,32 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 	load_bias_from_axi(bias_buf[0], bias_all[bias_3x3_index + 0]);
 	load_bias_from_axi(bias_buf[1], bias_all[bias_3x3_index + 1]);
 
+	// *you have to tiles to compute for the input channels
 	CI_N = 64 / 32;
 	CO_N = 96 / 32;
-
+	//* loop2
 	for(int row = 0; row < 4; row++) {
 		for(int col = 0; col < 4; col++) {
 
+			//TODO: will the following act as ping-pong? 
 			load_dw1_pool_from_DDR(DDR_dw1_pool_out_PL_burst, FM_buf1, 0, col, row, col/2, row/2);
 			set_bias_3x3(FM_buf2, bias_buf[0 + 0]);
-			DW_CONV_3x3(FM_buf1, FM_buf2, weight_buf_3x3[1 + 0], bias_buf[0 + 0], 1);
-
+			DW_CONV_3x3(FM_buf1, FM_buf2, weight_buf_3x3[1 + 0], bias_buf[0 + 0], 1);     // will this overlay with the next load as there is no conflict
+            //* overlay as expected due to no conflict
 			load_dw1_pool_from_DDR(DDR_dw1_pool_out_PL_burst, FM_buf4, 1, col, row, col/2, row/2);
 			set_bias_3x3(FM_buf3, bias_buf[0 + 1]);
 			DW_CONV_3x3(FM_buf4, FM_buf3, weight_buf_3x3[1 + 1], bias_buf[0 + 1], 1);
 
+			//TODO: will the following act as ping-pong?
 			for(int co = 0; co < CO_N; co++) {
 				load_bias_from_axi(bias_buf[2], bias_all[bias_1x1_index + co]);
 				set_bias_1x1(FM_buf_acc, bias_buf[2]);
 
 				load_weight_1x1_from_axi(weight_buf_1x1[0], conv_weight_1x1_all[weight_1x1_index + 0 + co * CI_N]);
 				CONV_1x1(FM_buf2, FM_buf_acc, weight_buf_1x1[0]);
-
+				//TODO: is not overlayed according to HLS synthesis
+				//TODO: because weight_buf_1x1 is not partitioned in the first dimension
+				//TODO: instead, it is partitioned in the second dimension 
 				load_weight_1x1_from_axi(weight_buf_1x1[1], conv_weight_1x1_all[weight_1x1_index + 1 + co * CI_N]);
 				CONV_1x1(FM_buf3, FM_buf_acc, weight_buf_1x1[1]);
 
@@ -918,12 +930,13 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 	load_bias_from_axi(bias_buf[0], bias_all[bias_3x3_index + 0]);
 	load_bias_from_axi(bias_buf[1], bias_all[bias_3x3_index + 1]);
 	load_bias_from_axi(bias_buf[2], bias_all[bias_3x3_index + 2]);
-
+	//* loop3
 	CI_N = 96 / 32;
 	CO_N = 192 / 32;
 	for(int row = 0; row < 2; row++) {
 		for(int col = 0; col < 2; col++) {
-
+			// TODO: you cannot overlay "load_dw2_pool_from_DDR" with "DW_CONV_3x3" due to conflict in FM_buff1
+			// TODO: set_bias_3x3 does not have to follow this specific order, thus can be overlayed with DW_CONV_3x3 or load_dw2_pool_from_DDR
 			load_dw2_pool_from_DDR(DDR_dw2_pool_out_PL_burst, FM_buf1, 0, col, row, col/1, row/1 );
 			set_bias_3x3(FM_buf2, bias_buf[0 + 0]);
 			DW_CONV_3x3(FM_buf1, FM_buf2, weight_buf_3x3[0 + 0], bias_buf[0 + 0], 1);
@@ -944,7 +957,7 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 
 				load_weight_1x1_from_axi(weight_buf_1x1[0], conv_weight_1x1_all[weight_1x1_index + 0 + co * CI_N]);
 				CONV_1x1(FM_buf2, FM_buf_acc, weight_buf_1x1[0]);
-
+				//TODO: cannot be overlayed because the lack of partition among weight_buf_1x1 1st dimension
 				load_weight_1x1_from_axi(weight_buf_1x1[1], conv_weight_1x1_all[weight_1x1_index + 1 + co * CI_N]);
 				CONV_1x1(FM_buf3, FM_buf_acc, weight_buf_1x1[1]);
 
@@ -973,7 +986,7 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 	bias_1x1_index += CO_N + CO_N;
 
 	CI_N = 192 / 32;
-
+	//* loop4
 	/// conv3x3: ping-pong in: FM_buf1 and FM_buf3
 	/// conv3x3: out: FM_buf2
 	load_buf_from_DDR(FM_buf1, DDR_buf_burst, 6 + 0);
@@ -997,7 +1010,7 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 	/// DW4_CONV_1x1
 	// input in DDR_buf[12] - DDR_buf[17]
 	// output in DDR_buf[18] - DDR_buf[29]
-
+	//* loop5
 	CO_N = 384 / 32;
 	for(int co = 0; co < CO_N; co++) {
 
@@ -1034,7 +1047,7 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 	bias_3x3_index += CI_N + CO_N;
 	weight_1x1_index += CO_N * CI_N;
 	bias_1x1_index += CO_N + CO_N;
-
+	//* loop6
 	CI_N = 384 / 32;
 	load_buf_from_DDR(FM_buf1, DDR_buf_burst, 18 + 0);
 	for(int c = 0; c < CI_N; c++) {
@@ -1058,7 +1071,7 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 	/// DW5_CONV_1x1
 	// input in DDR_buf[30] - DDR_buf[41]
 	// output in DDR_buf[42] - DDR_buf[57]
-
+	//* loop7
 	CO_N = 512 / 32;
 	for(int co = 0; co < CO_N; co++) {
 
@@ -1093,7 +1106,7 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 	weight_1x1_index += CO_N * CI_N;
 	bias_1x1_index += CO_N + CO_N;
 
-
+	//* loop8
 	// First half: 0~767 channels from DW3_conv_1x1_output
 	// Output of DW3_CONV_1x1_OUT are stored in DDR_buf[100] to DDR_buf[123]
 	// Output of first half are stored in DDR_buf[58] to DDR_buf[81]
@@ -1144,7 +1157,7 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 	// Output of DW5_CONV_1x1_OUT are stored in DDR_buf[42] - DDR_buf[57]
 	// Output of first half are stored in DDR_buf[82] to DDR_buf[97]
 	CI_N = 512 / 32;
-
+	//* loop9
 	load_buf_from_DDR(FM_buf1, DDR_buf_burst, 42 + 0);
 	for(int c = 0; c < CI_N; c++) {
 		load_weight_3x3_from_axi(weight_buf_3x3[0], conv_weight_3x3_all[weight_3x3_index + c + 24]);
@@ -1165,7 +1178,7 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 	/// DW6_CONV_1x1
 	// input in DDR_buf[58] - DDR_buf[97]
 	// output in DDR_buf[98] - DDR_buf[100]
-
+	//* loop10
 	bias_1x1_index += 24;
 	CO_N = 96 / 32;
 	CI_N = 1280 / 32;
@@ -1199,7 +1212,7 @@ void SkyNet(	uint8 image_in_raw_pad[3*162*2*322*2],
 	weight_1x1_index += CO_N * CI_N;
 	// input in DDR_buf[98] - DDR_buf[100]
 	// output in FM_buf_acc
-
+	//* loop11
 	CO_N = 32 / 32;
 	CI_N = 96 / 32;
 	for(int co = 0; co < CO_N; co++) {
